@@ -1,0 +1,362 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isDoctor() {
+      return request.auth != null
+        && get(/databases/$(database)/documents/users/$(request.auth.uid))
+          .data.role == 'doctor';
+    }
+
+    function isPatient() {
+      return request.auth != null
+        && get(/databases/$(database)/documents/users/$(request.auth.uid))
+          .data.role == 'patient';
+    }
+
+    function isAssignedDoctor(patientId) {
+      return isDoctor()
+        && get(/databases/$(database)/documents/users/$(patientId))
+          .data.role == 'patient'
+        && get(/databases/$(database)/documents/users/$(patientId))
+          .data.primaryDoctorUid == request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow get: if request.auth != null
+        && (request.auth.uid == userId
+          || (isDoctor()
+            && resource.data.role == 'patient'
+            && (resource.data.primaryDoctorUid == request.auth.uid
+              || resource.data.get('appointmentDoctorUids', [])
+                .hasAny([request.auth.uid])))
+          || resource.data.role == 'doctor');
+      allow list: if request.auth != null
+        && (resource.data.role == 'doctor'
+          || (isDoctor()
+            && resource.data.role == 'patient'
+            && (resource.data.primaryDoctorUid == request.auth.uid
+              || resource.data.get('appointmentDoctorUids', [])
+                .hasAny([request.auth.uid]))));
+
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.role == 'patient'
+        && request.resource.data.keys().hasOnly([
+          'name',
+          'email',
+          'role',
+          'createdAt',
+          'nic',
+          'dob',
+          'gender',
+          'phone',
+          'address',
+          'bloodGroup'
+        ]);
+
+      allow update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name',
+          'email',
+          'nic',
+          'dob',
+          'gender',
+          'phone',
+          'address',
+          'bloodGroup',
+          'appointmentDoctorUids'
+        ])
+        && (
+          !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['appointmentDoctorUids'])
+          || (
+            resource.data.role == 'patient'
+            && request.resource.data.appointmentDoctorUids is list
+            && (
+              !('appointmentDoctorUids' in resource.data)
+              || request.resource.data.appointmentDoctorUids
+                .hasAll(resource.data.appointmentDoctorUids)
+            )
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    match /clinicVisits/{visitId} {
+      allow get, list: if (isDoctor()
+          && resource.data.primaryDoctorUid == request.auth.uid)
+        || (isPatient() && resource.data.patientId == request.auth.uid);
+
+      allow create: if isDoctor()
+        && request.resource.data.doctorId == request.auth.uid
+        && request.resource.data.primaryDoctorUid == request.auth.uid
+        && request.resource.data.keys().hasAll([
+          'patientId',
+          'doctorId',
+          'primaryDoctorUid',
+          'date',
+          'hospital',
+          'clinic',
+          'doctor',
+          'symptoms',
+          'bp',
+          'heartRate',
+          'temperature',
+          'weight',
+          'height',
+          'diagnosis',
+          'treatment',
+          'medicines',
+          'notes',
+          'nextVisit'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'patientId',
+          'doctorId',
+          'primaryDoctorUid',
+          'date',
+          'hospital',
+          'clinic',
+          'doctor',
+          'symptoms',
+          'bp',
+          'heartRate',
+          'temperature',
+          'weight',
+          'height',
+          'diagnosis',
+          'treatment',
+          'medicines',
+          'notes',
+          'nextVisit'
+        ])
+        && isAssignedDoctor(request.resource.data.patientId)
+        && request.resource.data.date is timestamp
+        && request.resource.data.medicines is list
+        && (request.resource.data.nextVisit == null
+          || request.resource.data.nextVisit is timestamp);
+
+      allow update, delete: if false;
+    }
+
+    match /appointments/{appointmentId} {
+      allow get, list: if (isDoctor()
+          && resource.data.doctorId == request.auth.uid)
+        || (isPatient() && resource.data.patientId == request.auth.uid);
+
+      allow create: if request.resource.data.keys().hasAll([
+          'patientId',
+          'patientName',
+          'doctorId',
+          'date',
+          'time',
+          'hospital',
+          'clinic',
+          'doctor',
+          'status'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'patientId',
+          'patientName',
+          'doctorId',
+          'date',
+          'time',
+          'hospital',
+          'clinic',
+          'doctor',
+          'status'
+        ])
+        && request.resource.data.date is timestamp
+        && request.resource.data.time in [
+          '08:30 AM',
+          '09:00 AM',
+          '09:30 AM',
+          '10:00 AM',
+          '11:00 AM',
+          '02:00 PM'
+        ]
+        && request.resource.data.clinic in [
+          'General Clinic',
+          'Diabetes Clinic',
+          'Cardiology Clinic',
+          'Medical Clinic'
+        ]
+        && request.resource.data.status == 'upcoming'
+        && (
+          (
+            isPatient()
+            && request.resource.data.patientId == request.auth.uid
+            && get(/databases/$(database)/documents/users/$(request.resource.data.doctorId))
+              .data.role == 'doctor'
+            && request.resource.data.patientName
+              == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.name
+            && request.resource.data.doctor
+              == get(/databases/$(database)/documents/users/$(request.resource.data.doctorId)).data.name
+            && request.resource.data.hospital is string
+            && request.resource.data.hospital.size() > 0
+          )
+          || (
+            isDoctor()
+            && request.resource.data.doctorId == request.auth.uid
+            && isAssignedDoctor(request.resource.data.patientId)
+            && request.resource.data.patientName
+              == get(/databases/$(database)/documents/users/$(request.resource.data.patientId)).data.name
+            && request.resource.data.hospital is string
+            && request.resource.data.hospital.size() > 0
+            && request.resource.data.doctor
+              == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.name
+          )
+        );
+
+      allow update: if (
+          isDoctor()
+          && resource.data.doctorId == request.auth.uid
+          && resource.data.status == 'upcoming'
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status'])
+          && request.resource.data.status in ['completed', 'cancelled']
+        )
+        || (
+          isPatient()
+          && resource.data.patientId == request.auth.uid
+          && resource.data.status == 'upcoming'
+          && request.resource.data.status == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status'])
+        );
+
+      allow delete: if false;
+    }
+
+    match /labReports/{reportId} {
+      allow get, list: if (isDoctor()
+          && resource.data.primaryDoctorUid == request.auth.uid)
+        || (isPatient() && resource.data.patientId == request.auth.uid);
+
+      allow create: if isDoctor()
+        && request.resource.data.doctorId == request.auth.uid
+        && request.resource.data.primaryDoctorUid == request.auth.uid
+        && request.resource.data.keys().hasAll([
+          'patientId',
+          'doctorId',
+          'primaryDoctorUid',
+          'name',
+          'type',
+          'lab',
+          'date',
+          'status'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'patientId',
+          'doctorId',
+          'primaryDoctorUid',
+          'name',
+          'type',
+          'lab',
+          'date',
+          'status',
+          'fileName',
+          'storagePath',
+          'notes'
+        ])
+        && isAssignedDoctor(request.resource.data.patientId)
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.type is string
+        && request.resource.data.type.size() > 0
+        && request.resource.data.lab is string
+        && request.resource.data.lab.size() > 0
+        && request.resource.data.date is timestamp
+        && request.resource.data.status is string
+        && request.resource.data.status.size() > 0
+        && (
+          !request.resource.data.keys().hasAny(['notes'])
+          || request.resource.data.notes is string
+        )
+        && (
+          !request.resource.data.keys().hasAny([
+            'fileName',
+            'storagePath'
+          ])
+          || (
+            request.resource.data.keys().hasAll([
+              'fileName',
+              'storagePath'
+            ])
+            && request.resource.data.fileName is string
+            && request.resource.data.fileName.size() > 0
+            && request.resource.data.storagePath is string
+            && request.resource.data.storagePath.size() > 0
+            && request.resource.data.storagePath
+              == '${request.resource.data.patientId}/${reportId}/${request.resource.data.fileName}'
+          )
+        )
+        || (
+          isPatient()
+          && request.resource.data.patientId == request.auth.uid
+          && request.resource.data.doctorId == null
+          && request.resource.data.primaryDoctorUid == null
+          && request.resource.data.keys().hasAll([
+            'patientId',
+            'doctorId',
+            'primaryDoctorUid',
+            'name',
+            'type',
+            'lab',
+            'date',
+            'status'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'patientId',
+            'doctorId',
+            'primaryDoctorUid',
+            'name',
+            'type',
+            'lab',
+            'date',
+            'status',
+            'fileName',
+            'storagePath',
+            'notes'
+          ])
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.type is string
+          && request.resource.data.type.size() > 0
+          && request.resource.data.lab is string
+          && request.resource.data.lab.size() > 0
+          && request.resource.data.date is timestamp
+          && request.resource.data.status is string
+          && request.resource.data.status.size() > 0
+          && (
+            !request.resource.data.keys().hasAny(['notes'])
+            || request.resource.data.notes is string
+          )
+          && (
+            !request.resource.data.keys().hasAny([
+              'fileName',
+              'storagePath'
+            ])
+            || (
+              request.resource.data.keys().hasAll([
+                'fileName',
+                'storagePath'
+              ])
+              && request.resource.data.fileName is string
+              && request.resource.data.fileName.size() > 0
+              && request.resource.data.storagePath is string
+              && request.resource.data.storagePath.size() > 0
+              && request.resource.data.storagePath
+                == '${request.resource.data.patientId}/${reportId}/${request.resource.data.fileName}'
+            )
+          )
+        );
+
+      allow update, delete: if false;
+    }
+  }
+}
